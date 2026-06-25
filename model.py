@@ -8,7 +8,7 @@ class FCEncoder(nn.Module):
         super(FCEncoder, self).__init__()
         
         input_dim = params['input_dim']
-        output_dim = params['output_dim']
+        output_dim = params['latent_dim']
         hidden_dims = params.get('hidden_dims', []) 
         activation_name = params.get('non_linear', "")
         
@@ -47,7 +47,7 @@ class FCDecoder(nn.Module):
     def __init__(self, params):
         super(FCDecoder, self).__init__()
         
-        latent_dim = params['output_dim']
+        latent_dim = params['latent_dim']
         output_dim = params['input_dim']
         hidden_dims = params.get('hidden_dims', [])
         
@@ -158,24 +158,26 @@ class FastSINDyLibraryLayer(nn.Module):
         return prediction, Theta
    
 class SINDyAutoencoder(nn.Module):
-    def __init__(self, params, poly_degree=2, include_bias=True):
+    def __init__(self, params):  # Ensure it doesn't default to poly_degree=2 here
         super(SINDyAutoencoder, self).__init__()
         
         self.model_order = params.get('model_order', 1)
         self.encoder = FCEncoder(params)
         self.decoder = FCDecoder(params)
         
-        latent_dim = params['output_dim']
-        
-        # If order 1, library takes z. If order 2, library takes [z, dz]
+        latent_dim = params['latent_dim']
         library_input_dim = latent_dim if self.model_order == 1 else 2 * latent_dim
+        
+        # 1. READ THE POLY ORDER FROM PARAMS
+        poly_degree = params.get('poly_order', 3) 
         
         self.sindy_layer = FastSINDyLibraryLayer(
             library_input_dim=library_input_dim, 
             output_dim=latent_dim,
-            poly_degree=poly_degree,
-            include_bias=include_bias,
-            add_sine=params.get('include_sine', False)
+            poly_degree=poly_degree, # 2. PASS IT TO THE LAYER
+            include_bias=True,
+            add_sine=params.get('include_sine', False),
+            params=params
         )
 
         self._initialize_weights()
@@ -187,7 +189,7 @@ class SINDyAutoencoder(nn.Module):
                 nn.init.constant_(m.bias, 0.0)
 
 
-    def forward(self, x, dx, ddx=None):
+    def forward(self, x, dx, ddx=None, mask=None):
         network = {}
         network['x'] = x
         network['dx'] = dx
@@ -199,7 +201,7 @@ class SINDyAutoencoder(nn.Module):
             )
             
             # 2. Predict Latent Dynamics
-            dz_predict, Theta = self.sindy_layer(z)
+            dz_predict, Theta = self.sindy_layer(z, mask=mask)
             
             # 3. Decode & Propagate Derivatives (dx_decode from dz_predict)
             x_decode, dx_decode = torch.autograd.functional.jvp(
@@ -232,7 +234,7 @@ class SINDyAutoencoder(nn.Module):
             
             # 3. Predict Latent Dynamics (library takes both z and dz)
             z_combined = torch.cat([z, dz], dim=1)
-            ddz_predict, Theta = self.sindy_layer(z_combined)
+            ddz_predict, Theta = self.sindy_layer(z_combined, mask=mask)
             
             # 4. Decode First Order
             x_decode, dx_decode = torch.autograd.functional.jvp(
